@@ -5,39 +5,35 @@ import requests
 import smtplib
 import sys
 
-#Flag to enable/disable email notification
-sendEmailNotification=True
-SMTP_HOST='smtp_server_comes_here'
+# Flag to enable/disable email notification
+sendEmailNotification = True
+SMTP_HOST='10.10.10.10'
 
-#Cloudera Manager URL
-CM_URL = 'cm_url_comes_here'
 
-#Resource Manager URLs - Assuming HA here
-# If no HA, RM1_URL = RM2_URL
-RM1_URL= 'resource_manager1_url_comes_here'
-RM2_URL= 'resource_manager2_url_comes_here'
-
-#Cloudera Cluster Name
-CLUSTER_NAME = 'cloudra_cluster_name'
+### Stage
+CM_URL = 'http://cloudera_manager_host:<cloudera_port>'
+CLUSTER_NAME = 'NAME_OF_THE_CLUSTER'
+# CM API VERSION
+API_VERSION = 'v19'
 
 
 # Email sender
-sender = 'sender_email_address'
+sender = 'Flink@sender.com'
 
 # List of email receivers
-receivers = ['recepient_email_comes_here']
+receivers = ['email@email.com']
 
 
-def sendEmailNotification(SUBJECT,TEXT):
+def sendEmailNotification(SUBJECT, TEXT):
     # print('Subject: ', SUBJECT)
 
     BODY = '\r\n'.join([
-            'To: %s' % ','.join(receivers),
-            'From: %s' % sender,
-            'Subject: %s' %SUBJECT,
-            '',
-            TEXT
-            ])
+        'To: %s' % ','.join(receivers),
+        'From: %s' % sender,
+        'Subject: %s' % SUBJECT,
+        '',
+        TEXT
+    ])
     try:
         smtpObj = smtplib.SMTP(SMTP_HOST)
         smtpObj.ehlo()
@@ -49,12 +45,13 @@ def sendEmailNotification(SUBJECT,TEXT):
     finally:
         smtpObj.quit()
 
+
 def getYarnAppId():
     try:
-        URL = CM_URL + '/api/v10/clusters/' + CLUSTER_NAME  + '/services/yarn/yarnApplications'
-        print('URL: ', URL)
+        URL = CM_URL + '/api/' + API_VERSION +  '/clusters/' + CLUSTER_NAME + '/services/yarn/yarnApplications'
+        print('YARN_APP_URL: ', URL)
         resp = requests.get(URL, auth=('monitor', 'monitor'))
-        #print(resp.json().keys())
+        # print(resp.json().keys())
 
     except:
         sendEmailNotification('Critical: Unable to access Flink/Kafka Cloudera Manager',
@@ -64,37 +61,61 @@ def getYarnAppId():
         print('YarnApplication on the cluster: ', resp.json()['applications'])
         if len(resp.json()['applications']) == 0:
             sendEmailNotification('Critical: No Yarn Application Found Event Filter',
-                                  'Unable to Flink Yarn App - Please check')
+                                  'Unable to find Flink Yarn App - Please check')
             sys.exit()
         else:
             application_ID = resp.json()['applications'][0]['applicationId']
             print('YarnApplicationID:', resp.json()['applications'][0]['applicationId'])
             return application_ID
-        
-def findFlinkURL():
-    yarnAppId=getYarnAppId()
 
-    FLINK_URL_1 = RM1_URL + '/proxy/' + yarnAppId + '/jobs/'
-    FLINK_URL_2 = RM2_URL + '/proxy/' + yarnAppId + '/jobs/'
+
+def findFlinkURL():
+    yarnAppId = getYarnAppId()
+
+
+    roles_url= CM_URL + '/api/' + API_VERSION + '/clusters/' + CLUSTER_NAME + '/services/yarn/roles'
+    print('Yarn Roles URL: ',roles_url)
 
     try:
-        if "application/json" in requests.get(FLINK_URL_1).headers['content-type']:
-            return FLINK_URL_1
-        else:
-            return FLINK_URL_2
+        roles = requests.get(roles_url, auth=('monitor', 'monitor'))
+        # print(roles.json())
+        # print(type(roles.json()['items']))
+        # print('Loop over the roles json list')
+
+        # Identify active RMs host Id
+        host_id_list = []
+        for item in roles.json()['items']:
+            # print(item)
+            if item['type'] == 'RESOURCEMANAGER' and item['haStatus'] == 'ACTIVE':
+                host_id= item['hostRef']['hostId']
+                print('HostId = ', host_id)
+                host_id_list.append(host_id)
+
+        host_url = CM_URL + '/api/' + API_VERSION + '/hosts/' + host_id_list[0]
+
+        # Get hostId
+        resp3 = requests.get(host_url, auth=('monitor', 'monitor'))
+        # print(resp3.json())
+        # print(type(resp3.json()))
+
+        print('Active Resource Manager: ', resp3.json()['hostname'])
+        active_rm = resp3.json()['hostname']
+
+        FLINK_URL = 'http://' + active_rm + ':8088' + '/proxy/' + yarnAppId + '/jobs/'
+
+        if "application/json" in requests.get(FLINK_URL).headers['content-type']:
+            return FLINK_URL
+
     except:
+        print('Unable to determine active RM or Flink URL')
+
         event_subject = 'Flink could be down or not responding'
         event_body = 'Unable to get to /jobs endpoint to mointor Flink - Please check'
-        sendEmailNotification(event_subject,event_body)
-
-# print('Flink URL: {} '.format(findFlinkURL()))
-
-
+        sendEmailNotification(event_subject, event_body)
 
 
 def monitorFlink():
-
-    FLINK_URL=findFlinkURL()
+    FLINK_URL = findFlinkURL()
 
     print('Flink URL: ', FLINK_URL)
     try:
@@ -104,7 +125,7 @@ def monitorFlink():
         print('Jobs Failed:', resp.json()['jobs-failed'])
         print('Jobs Cancelled:', resp.json()['jobs-cancelled'])
 
-        #Send email if there are no running jobs
+        # Send email if there are no running jobs
         if len(resp.json()['jobs-running']) < 1:
             print("Critical: Event Filter Flink Job is DOWN!")
             event_subject = 'Critical: Event Filter Flink Job is DOWN!'
@@ -112,7 +133,7 @@ def monitorFlink():
             if sendEmailNotification:
                 sendEmailNotification(event_subject, event_body)
 
-        #Send email if there is more than one running Job
+        # Send email if there is more than one running Job
         if len(resp.json()['jobs-running']) > 1:
             print("More than ONE Flink Job is RUNNING - Please check")
             event_subject = 'ERROR: More than One Flink Job is RUNNING!'
@@ -120,7 +141,7 @@ def monitorFlink():
             if sendEmailNotification:
                 sendEmailNotification(event_subject, event_body)
 
-        #Send email if there are failed jobs
+        # Send email if there are failed jobs
         if len(resp.json()['jobs-failed']) > 0:
             print("Filnk Job Failed")
             event_subject = 'Event Filter Job Failed!'
@@ -130,10 +151,12 @@ def monitorFlink():
     except:
         event_subject = 'Flink could be down or not responding'
         event_body = 'Unable to get to /jobs endpoint to mointor Flink - Please check'
-        sendEmailNotification(event_subject,event_body)
+        sendEmailNotification(event_subject, event_body)
+
 
 def main():
     monitorFlink()
+
 
 if __name__ == "__main__":
     main()
